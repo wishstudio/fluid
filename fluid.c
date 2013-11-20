@@ -14,5 +14,11 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <stdlib.h>
+
 #include "fluid.h"
 
+char *fluid_decode(const char *data, int size, int *width, int *height)
+{
+	return NULL;
+}
