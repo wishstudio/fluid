@@ -1,4 +1,4 @@
-/*	
+/*
  * FLUID: Fast lightweight universal image decoder
  * Copyleft 2013 Xiangyan Sun (wishstudio@gmail.com)
  *
@@ -70,17 +70,19 @@ static int zlib_huffman_code(DEFLATE_status *status, int n, int *dest)
 		dest[i] = -1;
 
 	for (i = 0; i < n; i++)
-		status->codelen_count[status->codelen[i]]++;
+		if (status->codelen[i] > 0)
+			status->codelen_count[status->codelen[i]]++;
 	status->next_code[0] = 0;
 	for (i = 1; i <= DEFLATE_HUFFMAN_MAX_CODELEN; i++)
 		status->next_code[i] = (status->next_code[i - 1] + status->codelen_count[i - 1]) << 1;
 	for (i = 0; i < n; i++)
-	{
-		code = status->next_code[status->codelen[i]]++;
-		if (code >= (1 << status->codelen[i])) /* Too much codepoints for a given length */
-			return 0;
-		dest[code] = HC_VAL(status->codelen[i], i);
-	}
+		if (status->codelen[i] > 0)
+		{
+			code = status->next_code[status->codelen[i]]++;
+			if (code >= (1 << status->codelen[i])) /* Too much codepoints for a given length */
+				return 0;
+			dest[code] = HC_VAL(status->codelen[i], i);
+		}
 	return 1;
 }
 
@@ -139,6 +141,47 @@ static int zlib_extract_huffman_code(const unsigned char **data, int *bit, int *
 	}
 }
 
+static int zlib_read_huffman_codelen(const unsigned char **data, int *bit, int *size, int count, int *hm, int *codelen)
+{
+	int i, j, lit;
+	for (i = 0; i < count;)
+	{
+		if (*size <= 4)
+			return 0;
+		if (!zlib_extract_huffman_code(data, bit, size, hm, &lit) || lit > 18)
+			return 0;
+		if (lit < 16) /* Literal */
+			codelen[i++] = lit;
+		else if (lit == 16) /* Repeat last */
+		{
+			if (i == 0)
+				return 0;
+			j = j = 3 + zlib_extract_bits(data, bit, size, 2);
+			if (i + j > count)
+				return 0;
+			for (; j > 0; i++, j--)
+				codelen[i] = codelen[i - 1];
+		}
+		else if (lit == 17) /* Repeat zero */
+		{
+			j = 3 + zlib_extract_bits(data, bit, size, 3);
+			if (i + j > count)
+				return 0;
+			for (; j > 0; j--)
+				codelen[i++] = 0;
+		}
+		else /* Repeat zero */
+		{
+			j = 11 + zlib_extract_bits(data, bit, size, 7);
+			if (i + j > count)
+				return 0;
+			for (; j > 0; j--)
+				codelen[i++] = 0;
+		}
+	}
+	return 1;
+}
+
 static int zlib_deflate_decode(const unsigned char *data, int size, unsigned char *raw, int rawsize)
 {
 	int cmf, flg;
@@ -147,6 +190,7 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 	unsigned int bit; /* Current bit of *data (0 - 8) */
 
 	int bfinal, btype;
+	int hlit, hdist, hclen;
 	int i;
 	int lit, dist, len;
 
@@ -163,16 +207,16 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 	/* TODO: Check FLG */
 	current = raw;
 	bit = 0;
+	bfinal = 0;
 	while (current < raw + rawsize)
 	{
+		if (bfinal == 1) /* From last block */
+			return 0;
 		if (size <= 4)
 			return 0;
 		bfinal = zlib_extract_bits(&data, &bit, &size, 1);
 		btype = zlib_extract_bits(&data, &bit, &size, 2);
-		if (bfinal == 1)
-			return 0;
-
-		if (btype == 3) /* Reserved */
+		if (btype == 3)
 			return 0;
 
 		if (btype == 0) /* Non-compressed */
@@ -199,8 +243,30 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 			}
 			else /* Dynamic huffman code */
 			{
-				/* TODO */
-				return 0;
+				hlit = 257 + zlib_extract_bits(&data, &bit, &size, 5);
+				hdist = 1 + zlib_extract_bits(&data, &bit, &size, 5);
+				hclen = 4 + zlib_extract_bits(&data, &bit, &size, 4);
+				/* Generate length descriptor huffman code */
+				for (i = 0; i < 19; i++)
+					status.codelen[i] = 0;
+				for (i = 0; i < hclen; i++)
+				{
+					if (size <= 4)
+						return 0;
+					status.codelen[HCLEN_ORDER[i]] = zlib_extract_bits(&data, &bit, &size, 3);
+				}
+				if (!zlib_huffman_code(&status, 19, status.hm_dist))
+					return 0;
+				/* Generate literal/length huffman code */
+				if (!zlib_read_huffman_codelen(&data, &bit, &size, hlit, status.hm_dist, status.codelen))
+					return 0;
+				if (!zlib_huffman_code(&status, hlit, status.hm_lit))
+					return 0;
+				/* Generate distance huffman code */
+				if (!zlib_read_huffman_codelen(&data, &bit, &size, hdist, status.hm_dist, status.codelen))
+					return 0;
+				if (!zlib_huffman_code(&status, hdist, status.hm_dist))
+					return 0;
 			}
 			/* Actual decompressing */
 			for (;;)
@@ -208,9 +274,7 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 				/* Extract literal/length */
 				if (size <= 4)
 					return 0;
-				if (!zlib_extract_huffman_code(&data, &bit, &size, status.hm_lit, &lit))
-					return 0;
-				if (lit > 285) /* Invalid code points */
+				if (!zlib_extract_huffman_code(&data, &bit, &size, status.hm_lit, &lit) || lit > 285)
 					return 0;
 				if (lit == 256) /* End of block */
 					break;
