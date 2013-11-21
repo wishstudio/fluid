@@ -344,9 +344,10 @@ typedef struct
 	int width, height;
 	int depth, color_type;
 	int compression_method, filter_method, interlace_method;
+	int sample_per_pixel;
 	int zlen, rawlen, imagelen;
 	int hasalpha;
-	unsigned char *zraw, *raw, *image;
+	unsigned char *zraw, *raw, *defiltered, *image;
 } PNG_status;
 
 static int png_extract_chunk(const unsigned char **data, int *size, const unsigned char **chunk_type, const unsigned char **chunk_data, int *chunk_len)
@@ -391,6 +392,97 @@ static INLINE unsigned int png_rescale_sample(unsigned int depth, unsigned int s
 	}
 }
 
+static INLINE int png_paeth_predictor(int a, int b, int c)
+{
+	int p, pa, pb, pc;
+	p = a + b - c;
+	pa = abs(p - a);
+	pb = abs(p - b);
+	pc = abs(p - c);
+	if (pa <= pb && pa <= pc)
+		return a;
+	else if (pb <= pc)
+		return b;
+	else
+		return c;
+}
+
+static void png_defilter(const unsigned char *data, unsigned char *image, int width, int height, int depth, int sample_per_pixel)
+{
+	unsigned char type;
+	int i, j;
+	int ap, bp; /* Byte offset of a, b */
+	unsigned int a, b, c, k;
+	int scanline_len, sample_per_byte;
+
+	if (depth < 8)
+	{
+		sample_per_byte = 8 / depth;
+		scanline_len = 1 + (width * sample_per_pixel + sample_per_byte - 1) / sample_per_byte;
+	}
+	else
+		scanline_len = 1 + width * sample_per_pixel * depth / 8;
+
+	if (depth < 8)
+		ap = -1;
+	else
+		ap = -(depth / 8 * sample_per_pixel);
+	bp = -scanline_len;
+
+	for (i = 0; i < height; i++)
+	{
+		EXTRACT_UINT8(data, type);
+		*image++ = type;
+		if (type == 0) /* None */
+		{
+			for (j = 1; j < scanline_len; j++)
+			{
+				EXTRACT_UINT8(data, k);
+				*image++ = k;
+			}
+		}
+		else if (type == 1) /* Sub */
+		{
+			for (j = 1; j < scanline_len; j++)
+			{
+				a = (j + ap > 0) ? image[ap] : 0;
+				EXTRACT_UINT8(data, k);
+				*image++ = k + a;
+			}
+		}
+		else if (type == 2) /* Up */
+		{
+			for (j = 1; j < scanline_len; j++)
+			{
+				b = (i > 0) ? image[bp] : 0;
+				EXTRACT_UINT8(data, k);
+				*image++ = k + b;
+			}
+		}
+		else if (type == 3) /* Average */
+		{
+			for (j = 1; j < scanline_len; j++)
+			{
+				a = (j + ap > 0) ? image[ap] : 0;
+				b = (i > 0) ? image[bp] : 0;
+				EXTRACT_UINT8(data, k);
+				*image++ = k + (a + b) / 2;
+			}
+		}
+		else if (type == 4) /* Paeth */
+		{
+			for (j = 1; j < scanline_len; j++)
+			{
+				a = (j + ap > 0) ? image[ap] : 0;
+				b = (i > 0) ? image[bp] : 0;
+				c = (i > 0 && j + ap > 0) ? image[ap + bp] : 0;
+				EXTRACT_UINT8(data, k);
+				*image++ = k + png_paeth_predictor(a, b, c);
+			}
+		}
+	}
+}
+
 static void png_extract_pixels(PNG_status *status)
 {
 	const unsigned char *data;
@@ -410,9 +502,56 @@ static void png_extract_pixels(PNG_status *status)
 			data++; /* Filter type byte */
 			for (j = 0; j < status->width; j++)
 			{
-				sample = extract_bits_big(&data, &bit, &size, status->depth);
-				sample = png_rescale_sample(status->depth, sample);
+				sample = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
 				image[0] = image[1] = image[2] = sample;
+				image += 4;
+			}
+			if (bit > 0) /* Skip remaining bits */
+				data++, bit = 0;
+		}
+	}
+	else if (status->color_type == 2) /* Truecolor */
+	{
+		for (i = 0; i < status->height; i++)
+		{
+			data++; /* Filter type byte */
+			for (j = 0; j < status->width; j++)
+			{
+				image[0] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[1] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[2] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image += 4;
+			}
+			if (bit > 0) /* Skip remaining bits */
+				data++, bit = 0;
+		}
+	}
+	else if (status->color_type == 4) /* Gray with alpha */
+	{
+		for (i = 0; i < status->height; i++)
+		{
+			data++; /* Filter type byte */
+			for (j = 0; j < status->width; j++)
+			{
+				image[0] = image[1] = image[2] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[3] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image += 4;
+			}
+			if (bit > 0) /* Skip remaining bits */
+				data++, bit = 0;
+		}
+	}
+	else if (status->color_type == 6) /* Truecolor with alpha */
+	{
+		for (i = 0; i < status->height; i++)
+		{
+			data++; /* Filter type byte */
+			for (j = 0; j < status->width; j++)
+			{
+				image[0] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[1] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[2] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[3] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
 				image += 4;
 			}
 			if (bit > 0) /* Skip remaining bits */
@@ -469,18 +608,28 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 			goto FINISH;
 		if (status.filter_method != 0)
 			goto FINISH;
-		if (status.color_type != 0 && status.color_type != 2 && status.color_type != 3 && status.color_type != 4 && status.color_type != 6)
+		if (status.color_type == 0) /* Grayscale */
+			status.sample_per_pixel = 1;
+		else if (status.color_type == 2) /* Truecolor */
+			status.sample_per_pixel = 3;
+		else if (status.color_type == 3) /* Indexed */
+			status.sample_per_pixel = 1;
+		else if (status.color_type == 4) /* Gray with alpha */
+			status.sample_per_pixel = 2;
+		else if (status.color_type == 6) /* Truecolor with alpha */
+			status.sample_per_pixel = 4;
+		else
 			goto FINISH;
 		if (status.depth == 1)
-			status.rawlen = (1 + (status.width + 7) / 8) * status.height;
+			status.rawlen = (1 + (status.width * status.sample_per_pixel + 7) / 8) * status.height;
 		else if (status.depth == 2)
-			status.rawlen = (1 + (status.width + 3) / 4) * status.height;
+			status.rawlen = (1 + (status.width * status.sample_per_pixel + 3) / 4) * status.height;
 		else if (status.depth == 4)
-			status.rawlen = (1 + (status.width + 1) / 2) * status.height;
+			status.rawlen = (1 + (status.width * status.sample_per_pixel + 1) / 2) * status.height;
 		else if (status.depth == 8)
-			status.rawlen = (1 + status.width) * status.height;
+			status.rawlen = (1 + status.width * status.sample_per_pixel) * status.height;
 		else if (status.depth == 16)
-			status.rawlen = (1 + status.width * 2) * status.height;
+			status.rawlen = (1 + status.width * status.sample_per_pixel * 2) * status.height;
 		else
 			goto FINISH;
 
@@ -523,11 +672,24 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 		if (!zlib_deflate_decode(status.zraw, status.zlen, status.raw, status.rawlen))
 			goto FINISH;
 
+		/* Allocate all remaining memory in one place, since after this we'll never fail */
+		status.defiltered = malloc(status.rawlen);
 		status.imagelen = status.width * status.height * 4;
 		status.image = malloc(status.imagelen);
+		if (!status.defiltered || !status.image)
+			goto FINISH;
+
+		png_defilter(status.raw, status.defiltered, status.width, status.height, status.depth, status.sample_per_pixel);
+		/* Move defiltered directly to raw since no interlacing are used */
+		free(status.raw);
+		status.raw = status.defiltered;
+		status.defiltered = NULL;
+
 		png_extract_pixels(&status);
 	}
 FINISH:
+	if (status.defiltered)
+		free(status.defiltered);
 	if (status.zraw)
 		free(status.zraw);
 	if (status.raw)
