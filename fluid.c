@@ -30,8 +30,9 @@
 #define BITMASK(len) ((1 << (len)) - 1)
 #define EXTRACT_UINT8(data, x) \
 	{ x = (uint8_t)*(data)++; }
+#define GET_UINT16_BIG(data) (((data)[0] << 8) | (data)[1])
 #define EXTRACT_UINT16_BIG(data, x) \
-	{ x = ((data)[0] << 8) | (data)[1]; (data) += 2; }
+	{ x = GET_UINT16_BIG(data); (data) += 2; }
 #define EXTRACT_UINT16_LITTLE(data, x) \
 	{ x = *(uint16_t *)(data); (data) += 2; }
 #define EXTRACT_UINT24_BIG(data, x) \
@@ -361,13 +362,15 @@ typedef struct
 	int compression_method, filter_method, interlace_method;
 	int sample_per_pixel;
 	int zlen, rawlen, imagelen;
-	int hasalpha;
 	unsigned char *zraw, *raw, *defiltered, *interlaced, *image;
 	/* Palette */
 	int palette_count;
 	const unsigned char *palette;
 	/* Interlacing */
 	int adam7_pass_width[8], adam7_pass_height[8];
+	/* Transparency */
+	int transparency_count;
+	const unsigned char *transparency;
 } PNG_status;
 
 static int png_extract_chunk(const unsigned char **data, int *size, const unsigned char **chunk_type, const unsigned char **chunk_data, int *chunk_len)
@@ -552,20 +555,25 @@ static void png_deinterlace_adam7(PNG_status *status, const unsigned char *data,
 static int png_extract_pixels(PNG_status *status, const unsigned char *data, unsigned char *dest, int width, int height, int size)
 {
 	unsigned char *image;
-	unsigned int bit, sample;
+	unsigned int bit;
 	int i, j, index;
+	unsigned int sampler, sampleg, sampleb;
+	int tr, tg, tb;
 	
 	image = dest;
 	bit = 0;
 	if (status->color_type == 0) /* Grayscale */
 	{
+		if (status->transparency)
+			tg = GET_UINT16_BIG(status->transparency);
 		for (i = 0; i < height; i++)
 		{
 			data++; /* Filter type byte */
 			for (j = 0; j < width; j++)
 			{
-				sample = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
-				image[0] = image[1] = image[2] = sample;
+				sampleg = extract_bits_big(&data, &bit, &size, status->depth);
+				image[0] = image[1] = image[2] = png_rescale_sample(status->depth, sampleg);
+				image[3] = (status->transparency && sampleg == tg) ? 0 : 0xFF;
 				image += 4;
 			}
 			if (bit > 0) /* Skip remaining bits */
@@ -574,14 +582,24 @@ static int png_extract_pixels(PNG_status *status, const unsigned char *data, uns
 	}
 	else if (status->color_type == 2) /* Truecolor */
 	{
+		if (status->transparency)
+		{
+			tr = GET_UINT16_BIG(status->transparency);
+			tg = GET_UINT16_BIG(status->transparency + 2);
+			tb = GET_UINT16_BIG(status->transparency + 4);
+		}
 		for (i = 0; i < height; i++)
 		{
 			data++; /* Filter type byte */
 			for (j = 0; j < width; j++)
 			{
-				image[0] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
-				image[1] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
-				image[2] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				sampler = extract_bits_big(&data, &bit, &size, status->depth);
+				sampleg = extract_bits_big(&data, &bit, &size, status->depth);
+				sampleb = extract_bits_big(&data, &bit, &size, status->depth);
+				image[0] = png_rescale_sample(status->depth, sampler);
+				image[1] = png_rescale_sample(status->depth, sampleg);
+				image[2] = png_rescale_sample(status->depth, sampleb);
+				image[3] = (status->transparency && sampler == tr && sampleg == tg && sampleb == tb) ? 0 : 0xFF;
 				image += 4;
 			}
 			if (bit > 0) /* Skip remaining bits */
@@ -601,6 +619,7 @@ static int png_extract_pixels(PNG_status *status, const unsigned char *data, uns
 				image[0] = status->palette[index * 3 + 0];
 				image[1] = status->palette[index * 3 + 1];
 				image[2] = status->palette[index * 3 + 2];
+				image[3] = (status->transparency && index < status->transparency_count) ? status->transparency[index] : 0xFF;
 				image += 4;
 			}
 			if (bit > 0) /* Skip remaining bits */
@@ -639,20 +658,6 @@ static int png_extract_pixels(PNG_status *status, const unsigned char *data, uns
 				data++, bit = 0;
 		}
 	}
-
-	if (!status->hasalpha)
-	{
-		/* Add a full opaque alpha channel */
-		image = dest;
-		for (i = 0; i < height; i++)
-		{
-			for (int j = 0; j < width; j++)
-			{
-				image[3] = 0xFF;
-				image += 4;
-			}
-		}
-	}
 	return 1;
 }
 
@@ -668,8 +673,8 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 	status.defiltered = NULL;
 	status.interlaced = NULL;
 	status.image = NULL;
-	status.hasalpha = 0;
 	status.palette = NULL;
+	status.transparency = NULL;
 	
 	/* Dealing with IHDR chunk */
 	if (png_extract_chunk(&data, &size, &ctype, &cdata, &clen) &&
@@ -693,35 +698,30 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 		if (status.color_type == 0) /* Grayscale */
 		{
 			status.sample_per_pixel = 1;
-			status.hasalpha = 0;
 			if (status.depth != 1 && status.depth != 2 && status.depth != 4 && status.depth != 8 && status.depth != 16)
 				goto FINISH;
 		}
 		else if (status.color_type == 2) /* Truecolor */
 		{
 			status.sample_per_pixel = 3;
-			status.hasalpha = 0;
 			if (status.depth != 8 && status.depth != 16)
 				goto FINISH;
 		}
 		else if (status.color_type == 3) /* Indexed */
 		{
 			status.sample_per_pixel = 1;
-			status.hasalpha = 0;
 			if (status.depth != 1 && status.depth != 2 && status.depth != 4 && status.depth != 8)
 				goto FINISH;
 		}
 		else if (status.color_type == 4) /* Gray with alpha */
 		{
 			status.sample_per_pixel = 2;
-			status.hasalpha = 1;
 			if (status.depth != 8 && status.depth != 16)
 				goto FINISH;
 		}
 		else if (status.color_type == 6) /* Truecolor with alpha */
 		{
 			status.sample_per_pixel = 4;
-			status.hasalpha = 1;
 			if (status.depth != 8 && status.depth != 16)
 				goto FINISH;
 		}
@@ -780,6 +780,18 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 					goto FINISH;
 				status.palette_count = clen / 3;
 				status.palette = cdata;
+			}
+			else if (ctype[0] == 't' && ctype[1] == 'R' && ctype[2] == 'N' && ctype[3] == 'S')
+			{
+				/* Transparency */
+				if (status.color_type == 0 && clen != 2)
+					goto FINISH;
+				else if (status.color_type == 2 && clen != 6)
+					goto FINISH;
+				else if (status.color_type == 3 && (!status.palette || clen > status.palette_count))
+					goto FINISH;
+				status.transparency_count = clen;
+				status.transparency = cdata;
 			}
 		}
 
