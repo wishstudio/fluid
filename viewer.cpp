@@ -80,7 +80,7 @@ static void loadImage(HWND hWnd, LPWSTR fileName)
 		return;
 	}
 
-	/* ARGB -> BGRA */
+	/* ARGB -> BGRA, Premultiply alpha */
 	unsigned char *r = (unsigned char *) decoded;
 	for (int i = 0; i < height; i++)
 		for (int j = 0; j < width; j++)
@@ -88,6 +88,12 @@ static void loadImage(HWND hWnd, LPWSTR fileName)
 			unsigned char t = r[0];
 			r[0] = r[2];
 			r[2] = t;
+
+			/* Premultiply (for display) */
+			r[0] = r[0] * r[3] / 255 + (255 - r[3]);
+			r[1] = r[1] * r[3] / 255 + (255 - r[3]);
+			r[2] = r[2] * r[3] / 255 + (255 - r[3]);
+
 			r += 4;
 		}
 

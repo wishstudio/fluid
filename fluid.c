@@ -540,6 +540,7 @@ static void png_extract_pixels(PNG_status *status)
 			if (bit > 0) /* Skip remaining bits */
 				data++, bit = 0;
 		}
+		status->hasalpha = 1;
 	}
 	else if (status->color_type == 6) /* Truecolor with alpha */
 	{
@@ -557,6 +558,7 @@ static void png_extract_pixels(PNG_status *status)
 			if (bit > 0) /* Skip remaining bits */
 				data++, bit = 0;
 		}
+		status->hasalpha = 1;
 	}
 
 	if (!status->hasalpha)
