@@ -631,20 +631,43 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 		*width = status.width;
 		*height = status.height;
 
+		/* Initialization and basic checking */
 		if (status.compression_method != 0)
 			goto FINISH;
 		if (status.filter_method != 0)
 			goto FINISH;
+		if (status.interlace_method != 0 && status.interlace_method != 1)
+			goto FINISH;
 		if (status.color_type == 0) /* Grayscale */
+		{
 			status.sample_per_pixel = 1;
+			if (status.depth != 1 && status.depth != 2 && status.depth != 4 && status.depth != 8 && status.depth != 16)
+				goto FINISH;
+		}
 		else if (status.color_type == 2) /* Truecolor */
+		{
 			status.sample_per_pixel = 3;
+			if (status.depth != 8 && status.depth != 16)
+				goto FINISH;
+		}
 		else if (status.color_type == 3) /* Indexed */
+		{
 			status.sample_per_pixel = 1;
+			if (status.depth != 1 && status.depth != 2 && status.depth != 4 && status.depth != 8)
+				goto FINISH;
+		}
 		else if (status.color_type == 4) /* Gray with alpha */
+		{
 			status.sample_per_pixel = 2;
+			if (status.depth != 8 && status.depth != 16)
+				goto FINISH;
+		}
 		else if (status.color_type == 6) /* Truecolor with alpha */
+		{
 			status.sample_per_pixel = 4;
+			if (status.depth != 8 && status.depth != 16)
+				goto FINISH;
+		}
 		else
 			goto FINISH;
 		if (status.depth == 1)
@@ -711,21 +734,30 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 			goto FINISH;
 
 		status.defiltered = malloc(status.rawlen);
-		status.imagelen = status.width * status.height * 4;
-		status.image = malloc(status.imagelen);
-		if (!status.defiltered || !status.image)
+		if (!status.defiltered)
 			goto FINISH;
 
-		png_defilter(status.raw, status.defiltered, status.width, status.height, status.depth, status.sample_per_pixel);
-		/* Move defiltered directly to raw since no interlacing are used */
-		free(status.raw);
-		status.raw = status.defiltered;
-		status.defiltered = NULL;
+		if (status.interlace_method == 0)
+		{
+			png_defilter(status.raw, status.defiltered, status.width, status.height, status.depth, status.sample_per_pixel);
+			/* Move defiltered directly to raw since no interlacing are used */
+			free(status.raw);
+			status.raw = status.defiltered;
+			status.defiltered = NULL;
+		}
+		else
+		{
+		}
 
+		status.imagelen = status.width * status.height * 4;
+		status.image = malloc(status.imagelen);
+		if (!status.image)
+			goto FINISH;
 		if (!png_extract_pixels(&status))
 		{
 			free(status.image);
 			status.image = NULL;
+			goto FINISH;
 		}
 	}
 FINISH:
