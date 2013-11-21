@@ -386,6 +386,8 @@ static int png_extract_data_size(PNG_status *status, const unsigned char *data, 
 static INLINE int png_get_scanline_len(int width, int depth, int sample_per_pixel)
 {
 	int sample_per_byte;
+	if (width == 0)
+		return 0;
 	if (depth < 8)
 	{
 		sample_per_byte = 8 / depth;
