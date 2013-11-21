@@ -49,6 +49,34 @@ static int extract_bits_big(const unsigned char **data, int *bit, int *size, int
 	}
 	if (*bit + bits <= 8)
 	{
+		x = ((*data)[0] >> (8 - (*bit + bits))) & BITMASK(bits);
+		*bit += bits;
+	}
+	else if (*bit + bits <= 16)
+	{
+		x = ((((*data)[0] << 8) | (*data)[1]) >> (16 - (*bit + bits))) & BITMASK(bits);
+		*bit += bits - 8;
+		(*data)++, (*size)--;
+	}
+	else if (*bit + bits <= 24)
+	{
+		x = ((((*data)[0] << 16) | (*data)[1] << 8 | (*data)[2]) >> (24 - (*bit + bits))) & BITMASK(bits);
+		*bit += bits - 16;
+		(*data) += 2, (*size) -= 2;
+	}
+	return x;
+}
+
+static int extract_bits_little(const unsigned char **data, int *bit, int *size, int bits)
+{
+	int x;
+	if (*bit == 8)
+	{
+		*bit = 0;
+		(*data)++, (*size)--;
+	}
+	if (*bit + bits <= 8)
+	{
 		x = ((*data)[0] >> *bit) & BITMASK(bits);
 		*bit += bits;
 	}
@@ -131,7 +159,7 @@ static int zlib_extract_huffman_code(const unsigned char **data, int *bit, int *
 	int i, b, c;
 	for (c = 0, i = 0;;)
 	{
-		b = extract_bits_big(data, bit, size, 1);
+		b = extract_bits_little(data, bit, size, 1);
 		c = (c << 1) | b;
 		if (++i > DEFLATE_HUFFMAN_MAX_CODELEN)
 			return 0;
@@ -158,7 +186,7 @@ static int zlib_read_huffman_codelen(const unsigned char **data, int *bit, int *
 		{
 			if (i == 0)
 				return 0;
-			j = j = 3 + extract_bits_big(data, bit, size, 2);
+			j = j = 3 + extract_bits_little(data, bit, size, 2);
 			if (i + j > count)
 				return 0;
 			for (; j > 0; i++, j--)
@@ -166,7 +194,7 @@ static int zlib_read_huffman_codelen(const unsigned char **data, int *bit, int *
 		}
 		else if (lit == 17) /* Repeat zero */
 		{
-			j = 3 + extract_bits_big(data, bit, size, 3);
+			j = 3 + extract_bits_little(data, bit, size, 3);
 			if (i + j > count)
 				return 0;
 			for (; j > 0; j--)
@@ -174,7 +202,7 @@ static int zlib_read_huffman_codelen(const unsigned char **data, int *bit, int *
 		}
 		else /* Repeat zero */
 		{
-			j = 11 + extract_bits_big(data, bit, size, 7);
+			j = 11 + extract_bits_little(data, bit, size, 7);
 			if (i + j > count)
 				return 0;
 			for (; j > 0; j--)
@@ -216,8 +244,8 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 			return 0;
 		if (size <= 4)
 			return 0;
-		bfinal = extract_bits_big(&data, &bit, &size, 1);
-		btype = extract_bits_big(&data, &bit, &size, 2);
+		bfinal = extract_bits_little(&data, &bit, &size, 1);
+		btype = extract_bits_little(&data, &bit, &size, 2);
 		if (btype == 3)
 			return 0;
 
@@ -245,9 +273,9 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 			}
 			else /* Dynamic huffman code */
 			{
-				hlit = 257 + extract_bits_big(&data, &bit, &size, 5);
-				hdist = 1 + extract_bits_big(&data, &bit, &size, 5);
-				hclen = 4 + extract_bits_big(&data, &bit, &size, 4);
+				hlit = 257 + extract_bits_little(&data, &bit, &size, 5);
+				hdist = 1 + extract_bits_little(&data, &bit, &size, 5);
+				hclen = 4 + extract_bits_little(&data, &bit, &size, 4);
 				/* Generate length descriptor huffman code */
 				for (i = 0; i < 19; i++)
 					status.codelen[i] = 0;
@@ -255,7 +283,7 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 				{
 					if (size <= 4)
 						return 0;
-					status.codelen[HCLEN_ORDER[i]] = extract_bits_big(&data, &bit, &size, 3);
+					status.codelen[HCLEN_ORDER[i]] = extract_bits_little(&data, &bit, &size, 3);
 				}
 				if (!zlib_huffman_code(&status, 19, status.hm_dist))
 					return 0;
@@ -288,7 +316,7 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 				}
 				else /* Distance/length pair */
 				{
-					len = LEN_BASE[lit - 257] + extract_bits_big(&data, &bit, &size, LEN_BITS[lit - 257]);
+					len = LEN_BASE[lit - 257] + extract_bits_little(&data, &bit, &size, LEN_BITS[lit - 257]);
 					/* Extract distance */
 					if (size <= 4)
 						return 0;
@@ -296,7 +324,7 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 						return 0;
 					if (lit > 29) /* Invalid code point */
 						return 0;
-					dist = DIST_BASE[lit] + extract_bits_big(&data, &bit, &size, DIST_BITS[lit]);
+					dist = DIST_BASE[lit] + extract_bits_little(&data, &bit, &size, DIST_BITS[lit]);
 					/* Copy data */
 					cp = current - dist;
 					if (cp < raw || current + len > raw + rawsize)
@@ -372,13 +400,14 @@ static void png_extract_pixels(PNG_status *status)
 	int i, j;
 	
 	data = status->raw;
+	bit = 0;
 	size = status->rawlen;
 	image = status->image;
 	if (status->color_type == 0) /* Grayscale */
 	{
 		for (i = 0; i < status->height; i++)
 		{
-			data++, bit = 0; /* Filter type byte */
+			data++; /* Filter type byte */
 			for (j = 0; j < status->width; j++)
 			{
 				sample = extract_bits_big(&data, &bit, &size, status->depth);
@@ -386,6 +415,8 @@ static void png_extract_pixels(PNG_status *status)
 				image[0] = image[1] = image[2] = sample;
 				image += 4;
 			}
+			if (bit > 0) /* Skip remaining bits */
+				data++, bit = 0;
 		}
 	}
 
@@ -397,7 +428,7 @@ static void png_extract_pixels(PNG_status *status)
 		{
 			for (int j = 0; j < status->width; j++)
 			{
-				*image = 255;
+				image[3] = 0xFF;
 				image += 4;
 			}
 		}
@@ -428,6 +459,11 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 		EXTRACT_UINT8(cdata, status.compression_method);
 		EXTRACT_UINT8(cdata, status.filter_method);
 		EXTRACT_UINT8(cdata, status.interlace_method);
+
+		if (status.width < 0 || status.height < 0)
+			return 0;
+		*width = status.width;
+		*height = status.height;
 
 		if (status.compression_method != 0)
 			goto FINISH;

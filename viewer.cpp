@@ -27,6 +27,9 @@
 /* Control definitions */
 #define IDC_BROWSE_BUTTON	101
 
+HBITMAP bitmap;
+int bitmapWidth, bitmapHeight;
+
 static char *readFile(LPWSTR fileName, int *fileSize)
 {
 	HANDLE hFile = CreateFileW(fileName, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -77,7 +80,34 @@ static void loadImage(HWND hWnd, LPWSTR fileName)
 		return;
 	}
 
-	/* TODO */
+	/* ARGB -> BGRA */
+	unsigned char *r = (unsigned char *) decoded;
+	for (int i = 0; i < height; i++)
+		for (int j = 0; j < width; j++)
+		{
+			unsigned char t = r[0];
+			r[0] = r[2];
+			r[2] = t;
+			r += 4;
+		}
+
+	if (bitmap)
+		DeleteObject(bitmap);
+	bitmapWidth = width;
+	bitmapHeight = height;
+
+	BITMAPINFO bmi;
+	bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bmi.bmiHeader.biWidth = width;
+	bmi.bmiHeader.biHeight = -height;
+	bmi.bmiHeader.biPlanes = 1;
+	bmi.bmiHeader.biBitCount = 32;
+	bmi.bmiHeader.biCompression = BI_RGB;
+	bmi.bmiHeader.biSizeImage = width * height * 4;
+	HDC hdc = GetDC(hWnd);
+	bitmap = CreateDIBitmap(hdc, &bmi.bmiHeader, CBM_INIT, decoded, &bmi, DIB_RGB_COLORS);
+	ReleaseDC(hWnd, hdc);
+	SendMessageW(hWnd, WM_PAINT, 0, 0);
 	free(decoded);
 }
 
@@ -155,6 +185,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		break;
 
 	case WM_PAINT:
+		HDC dc = GetDC(hWnd);
+		HDC bitmapDC = CreateCompatibleDC(dc);
+		SelectObject(bitmapDC, bitmap);
+		BitBlt(dc, 10, 100, bitmapWidth, bitmapHeight, bitmapDC, 0, 0, SRCCOPY);
+		DeleteDC(bitmapDC);
+		ReleaseDC(hWnd, dc);
 		break;
 	}
 	return DefWindowProcW(hWnd, message, wParam, lParam);
@@ -222,6 +258,8 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 		if (msg.message == WM_QUIT)
 			break;
 	}
+	if (bitmap)
+		DeleteObject(bitmap);
 
 	CoUninitialize();
 	return 0;
