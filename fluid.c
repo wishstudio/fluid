@@ -32,6 +32,8 @@
 	{ x = (uint8_t)*(data)++; }
 #define EXTRACT_UINT16_BIG(data, x) \
 	{ x = ((data)[0] << 8) | (data)[1]; (data) += 2; }
+#define EXTRACT_UINT16_LITTLE(data, x) \
+	{ x = *(uint16_t *)(data); (data) += 2; }
 #define EXTRACT_UINT24_BIG(data, x) \
 	{ x = ((data)[0] << 16) | ((data)[1] << 8) | (data)[2]; (data) += 3; }
 #define EXTRACT_UINT32_BIG(data, x) \
@@ -222,7 +224,7 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 	int bfinal, btype;
 	int hlit, hdist, hclen;
 	int i;
-	int lit, dist, len;
+	int lit, dist, len, nlen;
 
 	DEFLATE_status status;
 
@@ -251,7 +253,20 @@ static int zlib_deflate_decode(const unsigned char *data, int size, unsigned cha
 
 		if (btype == 0) /* Non-compressed */
 		{
-			/* TODO */
+			if (bit > 0)
+				data++, bit = 0;
+			if (size <= 4)
+				return 0;
+			EXTRACT_UINT16_LITTLE(data, len);
+			EXTRACT_UINT16_LITTLE(data, nlen);
+			size -= 4;
+			if (size < 4 + len)
+				return 0;
+			size -= len;
+			if ((len | nlen) != 0xFFFF)
+				return 0;
+			for (i = 0; i < len; i++)
+				*current++ = *data++;
 		}
 		else /* Compressed */
 		{
