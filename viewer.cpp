@@ -188,7 +188,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		HDC dc = GetDC(hWnd);
 		HDC bitmapDC = CreateCompatibleDC(dc);
 		SelectObject(bitmapDC, bitmap);
-		BitBlt(dc, 10, 100, bitmapWidth, bitmapHeight, bitmapDC, 0, 0, SRCCOPY);
+		StretchBlt(dc, 10, 100, bitmapWidth * 10, bitmapHeight * 10, bitmapDC, 0, 0, bitmapWidth, bitmapHeight, SRCCOPY);
 		DeleteDC(bitmapDC);
 		ReleaseDC(hWnd, dc);
 		break;
