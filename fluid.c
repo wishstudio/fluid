@@ -444,7 +444,7 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 		else if (status.depth == 8)
 			status.rawlen = (1 + status.width) * status.height;
 		else if (status.depth == 16)
-			status.rawlen = (1 + status.width) * status.height * 2;
+			status.rawlen = (1 + status.width * 2) * status.height;
 		else
 			goto FINISH;
 
