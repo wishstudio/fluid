@@ -348,6 +348,9 @@ typedef struct
 	int zlen, rawlen, imagelen;
 	int hasalpha;
 	unsigned char *zraw, *raw, *defiltered, *image;
+	/* Palette */
+	int palette_count;
+	const unsigned char *palette;
 } PNG_status;
 
 static int png_extract_chunk(const unsigned char **data, int *size, const unsigned char **chunk_type, const unsigned char **chunk_data, int *chunk_len)
@@ -483,13 +486,13 @@ static void png_defilter(const unsigned char *data, unsigned char *image, int wi
 	}
 }
 
-static void png_extract_pixels(PNG_status *status)
+static int png_extract_pixels(PNG_status *status)
 {
 	const unsigned char *data;
 	unsigned char *image;
 	unsigned int bit, sample;
 	int size;
-	int i, j;
+	int i, j, index;
 	
 	data = status->raw;
 	bit = 0;
@@ -520,6 +523,25 @@ static void png_extract_pixels(PNG_status *status)
 				image[0] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
 				image[1] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
 				image[2] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image += 4;
+			}
+			if (bit > 0) /* Skip remaining bits */
+				data++, bit = 0;
+		}
+	}
+	else if (status->color_type == 3) /* Indexed */
+	{
+		for (i = 0; i < status->height; i++)
+		{
+			data++; /* Filter type byte */
+			for (j = 0; j < status->width; j++)
+			{
+				index = extract_bits_big(&data, &bit, &size, status->depth);
+				if (index >= status->palette_count)
+					return 0;
+				image[0] = status->palette[index * 3 + 0];
+				image[1] = status->palette[index * 3 + 1];
+				image[2] = status->palette[index * 3 + 2];
 				image += 4;
 			}
 			if (bit > 0) /* Skip remaining bits */
@@ -574,6 +596,7 @@ static void png_extract_pixels(PNG_status *status)
 			}
 		}
 	}
+	return 1;
 }
 
 static char *png_decode(const unsigned char *data, int size, int *width, int *height)
@@ -588,6 +611,7 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 	status.defiltered = NULL;
 	status.image = NULL;
 	status.hasalpha = 0;
+	status.palette = NULL;
 	
 	/* Dealing with IHDR chunk */
 	if (png_extract_chunk(&data, &size, &ctype, &cdata, &clen) &&
@@ -666,7 +690,18 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 			}
 			if (ctype[0] == 'I' && ctype[1] == 'E' && ctype[2] == 'N' && ctype[3] == 'D')
 				break;
+			else if (ctype[0] == 'P' && ctype[1] == 'L' && ctype[2] == 'T' && ctype[3] == 'E')
+			{
+				/* Palette */
+				if (clen % 3 || clen / 3 > (1 << status.depth))
+					goto FINISH;
+				status.palette_count = clen / 3;
+				status.palette = cdata;
+			}
 		}
+
+		if (status.color_type == 3 && !status.palette) /* No palette for indexed color type */
+			goto FINISH;
 
 		/* Zlib decompress */
 		status.raw = malloc(status.rawlen);
@@ -675,7 +710,6 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 		if (!zlib_deflate_decode(status.zraw, status.zlen, status.raw, status.rawlen))
 			goto FINISH;
 
-		/* Allocate all remaining memory in one place, since after this we'll never fail */
 		status.defiltered = malloc(status.rawlen);
 		status.imagelen = status.width * status.height * 4;
 		status.image = malloc(status.imagelen);
@@ -688,7 +722,11 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 		status.raw = status.defiltered;
 		status.defiltered = NULL;
 
-		png_extract_pixels(&status);
+		if (!png_extract_pixels(&status))
+		{
+			free(status.image);
+			status.image = NULL;
+		}
 	}
 FINISH:
 	if (status.defiltered)
