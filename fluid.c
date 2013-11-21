@@ -583,6 +583,7 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 
 	status.zraw = NULL;
 	status.raw = NULL;
+	status.defiltered = NULL;
 	status.image = NULL;
 	status.hasalpha = 0;
 	
