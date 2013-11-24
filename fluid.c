@@ -903,7 +903,7 @@ FINISH:
 typedef struct
 {
 	int H, V, Tq;
-	int Y, X;
+	int Y, X, linebytes;
 	int valid;
 	unsigned char *raw;
 } JPEG_component;
@@ -941,6 +941,8 @@ typedef struct
 	JPEG_component comp[JPEG_COMPONENTS_COUNT];
 	JPEG_quantization_table qtable[4];
 	JPEG_huffman_table htable[4];
+	/* Final image */
+	unsigned char *image;
 } JPEG_status;
 
 static int jpeg_extract_segment(const unsigned char **data, int *size, unsigned char *seg_type, const unsigned char **seg_data, int *seg_len)
@@ -1098,19 +1100,69 @@ static int jpeg_process_sof(JPEG_status *status, unsigned char stype, const unsi
 	{
 		status->comp[k].Y = (int)ceil((double)status->comp[k].V / (double)status->vmax) * status->Y;
 		status->comp[k].X = (int)ceil((double)status->comp[k].H / (double)status->hmax) * status->X;
+		status->comp[k].linebytes = (status->comp[k].Y + 7) / 8 * 8;
 		status->comp[k].raw = malloc(((status->comp[k].X + 7) / 8) * ((status->comp[k].Y + 7) / 8) * 64); /* Fit 8x8 block */
 	}
 	return 1;
 }
 
+/* The EXTEND procedure in JPEG specification */
+static INLINE int jpeg_extend(unsigned char raw, int t)
+{
+	int Vt;
+	
+	Vt = 1 << (t - 1);
+	if (raw < Vt)
+	{
+		Vt = ((-1) << t) + 1;
+		return (int)raw + Vt;
+	}
+	return (int)raw;
+}
+
+/* TODO: Optimization */
+static const double pi = 3.1415926535897932384626433832795028841971693993751;
+static void jpeg_idct(int *src)
+{
+	int S[64];
+	int x, y, u, v;
+	double ans, cu, cv;
+
+	memcpy(S, src, 64 * sizeof(int));
+	for (y = 0; y < 8; y++)
+		for (x = 0; x < 8; x++)
+		{
+			ans = 0;
+			for (v = 0; v < 8; v++)
+				for (u = 0; u < 8; u++)
+				{
+					cu = (u == 0) ? 1.0 / sqrt(2) : 1;
+					cv = (v == 0) ? 1.0 / sqrt(2) : 1;
+					ans += cu * cv * S[u * 8 + v] * cos((2 * x + 1) * u * pi / 16) * cos((2 * y + 1) * v * pi / 16);
+				}
+			src[y * 8 + x] = (int)(ans / 4);
+		}
+}
+
+static const int jpeg_zigzag[8][8] = {
+	{  0,  1,  5,  6, 14, 15, 27, 28 },
+	{  2,  4,  7, 13, 16, 26, 29, 42 },
+	{  3,  8, 12, 17, 25, 30, 41, 43 },
+	{  9, 11, 18, 24, 31, 40, 44, 53 },
+	{ 10, 19, 23, 32, 39, 45, 52, 54 },
+	{ 20, 22, 33, 38, 46, 51, 55, 60 },
+	{ 21, 34, 37, 47, 50, 56, 59, 61 },
+	{ 35, 36, 48, 49, 57, 58, 62, 63 },
+};
 static int jpeg_process_scan(JPEG_status *status, unsigned char stype, const unsigned char *sdata, int size)
 {
-	int i, j, k, c, g, mx, my, x, y;
-	int ycnt, xcnt, mcucnt;
+	int i, j, k, c, g, mx, my, x, y, X, Y;
+	int ycnt, xcnt, mcucnt, mcutotal;
 	int bit;
 	unsigned char t, rs, r, s;
-	unsigned char raw[64];
+	int raw[64], co[64];
 
+	/* raw[0] = PRED */
 	memset(raw, 0, sizeof(raw));
 
 	/* TODO: Check size */
@@ -1130,12 +1182,13 @@ static int jpeg_process_scan(JPEG_status *status, unsigned char stype, const uns
 	status->Ah = HIBYTE(j);
 	status->Al = LOBYTE(j);
 	/* These shall all be zero for sequential DCT process */
-	if (status->Ss != 0 || status->Se != 0 || status->Ah != 0 || status->Al != 0)
+	if (status->Ss != 0 || status->Se != 63 || status->Ah != 0 || status->Al != 0)
 		return 0;
 
 	/* Extents of MCU */
 	ycnt = ((status->Y + 7) / 8 + status->vmax - 1) / status->vmax;
 	xcnt = ((status->X + 7) / 8 + status->hmax - 1) / status->hmax;
+	mcutotal = ycnt * xcnt;
 	mcucnt = 0;
 	bit = 0;
 
@@ -1152,7 +1205,7 @@ static int jpeg_process_scan(JPEG_status *status, unsigned char stype, const uns
 						/* Decode 8x8 block */
 						/* Read data in */
 						jpeg_extract_huffman_code(&status->htable[status->Td[k]], &sdata, &bit, &size, &t);
-						raw[0] = extract_bits_big(&sdata, &bit, &size, t);
+						raw[0] += jpeg_extend(extract_bits_big(&sdata, &bit, &size, t), t);
 						for (g = 1; g <= 63;)
 						{
 							jpeg_extract_huffman_code(&status->htable[status->Ta[k]], &sdata, &bit, &size, &rs);
@@ -1169,16 +1222,44 @@ static int jpeg_process_scan(JPEG_status *status, unsigned char stype, const uns
 							{
 								g += r;
 								jpeg_extract_huffman_code(&status->htable[status->Ta[k]], &sdata, &bit, &size, &t);
-								raw[g] = extract_bits_big(&sdata, &bit, &size, t);
+								raw[g] = jpeg_extend(extract_bits_big(&sdata, &bit, &size, t), t);
 							}
 						}
-						/* Extend, quantization and IDCT */
+						/* Dequantization and de-zigzag */
+						for (y = 0; y < 8; y++)
+							for (x = 0; x < 8; x++)
+							{
+								g = jpeg_zigzag[y][x];
+								co[y * 8 + x] = raw[g] * status->qtable[status->comp[c].Tq].Qk[g];
+							}
+						/* IDCT */
+						jpeg_idct(co);
+						/* Written data */
+						for (y = 0; y < 8; y++)
+							for (x = 0; x < 8; x++)
+							{
+								Y = (i * status->comp[c].V + my) * 8 + y;
+								X = (j * status->comp[c].H + mx) * 8 + x;
+								status->comp[c].raw[status->comp[c].linebytes * Y + X] = co[y * 8 + x] + 128;
+							}
 					}
 			}
 			mcucnt++;
-			if (mcucnt == status->Ri) /* Should occur a RST marker */
+			if ((mcucnt % status->Ri == 0) && mcucnt < mcutotal) /* Should occur a RST marker */
 			{
-				/* TODO */
+				/* Reset PRED */
+				raw[0] = 0;
+
+				/* Skip remaining bits in current byte */
+				/* TODO: Check size */
+				if (bit > 0)
+					sdata++, bit = 0, size--;
+				if (*sdata != 0xFF)
+					return 0;
+				sdata++, size--;
+				if (*sdata < JPEG_RST0 || *sdata > JPEG_RST7)
+					return 0;
+				sdata++, size--;
 			}
 		}
 
@@ -1191,7 +1272,7 @@ static char *jpeg_decode(const unsigned char *data, int size, int *width, int *h
 	const unsigned char *sdata;
 	int slen;
 	JPEG_status status;
-	int i;
+	int i, j;
 
 	memset(&status, 0, sizeof(JPEG_status));
 
@@ -1220,12 +1301,22 @@ static char *jpeg_decode(const unsigned char *data, int size, int *width, int *h
 	}
 	if (!jpeg_process_scan(&status, stype, sdata, slen))
 		goto FINISH;
+
+	status.image = malloc(status.Y * status.X * 4);
+	if (!status.image)
+		goto FINISH;
+	*width = status.X;
+	*height = status.Y;
+	/* TODO */
+	for (i = 0; i < status.Y; i++)
+		for (j = 0; j < status.X; j++)
+			status.image[i * status.X + j] = status.comp[1].raw[status.comp[1].linebytes * i + j];
 	
 FINISH:
 	for (i = 0; i < JPEG_COMPONENTS_COUNT; i++)
 		if (status.comp[i].raw)
 			free(status.comp[i].raw);
-	return NULL;
+	return status.image;
 }
 
 char *fluid_decode(const char *_data, int size, int *width, int *height)
