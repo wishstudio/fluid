@@ -14,6 +14,7 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -862,16 +863,387 @@ FINISH:
 	return status.image;
 }
 
+/* JPEG Decoder */
+#define JPEG_SOF0		0xC0
+#define JPEG_SOF1		0xC1
+#define JPEG_SOF2		0xC2
+#define JPEG_SOF3		0xC3
+#define JPEG_DHT		0xC4
+#define JPEG_SOF5		0xC5
+#define JPEG_SOF6		0xC6
+#define JPEG_SOF7		0xC7
+#define JPEG_JPG		0xC8
+#define JPEG_SOF9		0xC9
+#define JPEG_SOF10		0xCA
+#define JPEG_SOF11		0xCB
+#define JPEG_DAC		0xCC
+#define JPEG_SOF13		0xCD
+#define JPEG_SOF14		0xCE
+#define JPEG_SOF15		0xCF
+#define JPEG_RST0		0xD0
+#define JPEG_RST1		0xD1
+#define JPEG_RST2		0xD2
+#define JPEG_RST3		0xD3
+#define JPEG_RST4		0xD4
+#define JPEG_RST5		0xD5
+#define JPEG_RST6		0xD6
+#define JPEG_RST7		0xD7
+#define JPEG_SOI		0xD8
+#define JPEG_EOI		0xD9
+#define JPEG_SOS		0xDA
+#define JPEG_DQT		0xDB
+#define JPEG_DNL		0xDC
+#define JPEG_DRI		0xDD
+#define JPEG_DHP		0xDE
+#define JPEG_EXP		0xDF
+#define JPEG_COMPONENTS_COUNT		256
+#define JPEG_SCAN_COMPONENTS_COUNT	5
+#define JPEG_HUFFMAN_LENGTH_MAX		255
+#define JPEG_HUFFMAN_LENGTH_COUNT	17
+typedef struct
+{
+	int H, V, Tq;
+	int Y, X;
+	int valid;
+	unsigned char *raw;
+} JPEG_component;
+
+typedef struct
+{
+	int Pq; /* Precision */
+	int Qk[64];
+	int valid;
+} JPEG_quantization_table;
+
+typedef struct
+{
+	int Tc; /* Table class: 0 = DC, 1 = AC */
+	int L[JPEG_HUFFMAN_LENGTH_COUNT];
+	int hmin[JPEG_HUFFMAN_LENGTH_COUNT], hmax[JPEG_HUFFMAN_LENGTH_COUNT];
+	int V[JPEG_HUFFMAN_LENGTH_COUNT][JPEG_HUFFMAN_LENGTH_MAX];
+	int valid;
+} JPEG_huffman_table;
+
+typedef struct
+{
+	/* Frame header */
+	int P;
+	int Y, X;
+	int Nf;
+	int hmax, vmax;
+	/* Scan header */
+	int Ns;
+	int Cs[JPEG_SCAN_COMPONENTS_COUNT], Td[JPEG_SCAN_COMPONENTS_COUNT], Ta[JPEG_SCAN_COMPONENTS_COUNT];
+	int Ss, Se, Ah, Al;
+	/* Restart interval */
+	int Ri;
+	/* Tables */
+	JPEG_component comp[JPEG_COMPONENTS_COUNT];
+	JPEG_quantization_table qtable[4];
+	JPEG_huffman_table htable[4];
+} JPEG_status;
+
+static int jpeg_extract_segment(const unsigned char **data, int *size, unsigned char *seg_type, const unsigned char **seg_data, int *seg_len)
+{
+	if (*size < 2)
+		return 0;
+	EXTRACT_UINT8(*data, *seg_type);
+	(*size)--;
+	if (*seg_type != 0xFF)
+		return 0;
+	while (*size >= 1)
+	{
+		EXTRACT_UINT8(*data, *seg_type);
+		(*size)--;
+		if (*seg_type != 0xFF)
+			break;
+	}
+	if ((*seg_type >= JPEG_RST0 && *seg_type <= JPEG_RST7) || *seg_type == JPEG_SOI || *seg_type == JPEG_EOI) /* Standard-alone marker */
+		return 1;
+	if (*size < 2)
+		return 0;
+	EXTRACT_UINT16_BIG(*data, *seg_len);
+	*size -= 2;
+	*seg_len -= 2;
+	if (*size < *seg_len)
+		return 0;
+	*size -= *seg_len;
+	*seg_data = *data;
+	*data += *seg_len;
+	return 1;
+}
+
+static int jpeg_process_restart_interval(JPEG_status *status, unsigned char stype, const unsigned char *sdata, int slen)
+{
+	if (slen != 2)
+		return 0;
+	EXTRACT_UINT16_BIG(sdata, status->Ri);
+	return 1;
+}
+
+static int jpeg_process_quantization_table(JPEG_status *status, unsigned char stype, const unsigned char *sdata, int slen)
+{
+	/* TODO: Check size */
+	int i, j, Pq, Tq;
+	EXTRACT_UINT8(sdata, j);
+	Pq = HIBYTE(j);
+	if (Pq == 0)
+		Pq = 8;
+	else if (Pq == 1)
+		Pq = 16;
+	else
+		return 0;
+	Tq = LOBYTE(j);
+	status->qtable[Tq].valid = 1;
+	status->qtable[Tq].Pq = Pq;
+	if (Pq == 8)
+	{
+		for (i = 0; i < 64; i++)
+			EXTRACT_UINT8(sdata, status->qtable[Tq].Qk[i]);
+	}
+	else
+	{
+		for (i = 0; i < 64; i++)
+			EXTRACT_UINT16_BIG(sdata, status->qtable[Tq].Qk[i]);
+	}
+	return 1;
+}
+
+static int jpeg_process_huffman_table(JPEG_status *status, unsigned char stype, const unsigned char *sdata, int slen)
+{
+	/* TODO: Check size and validity */
+	int i, j, Tc, Th;
+	EXTRACT_UINT8(sdata, j);
+	Tc = HIBYTE(j);
+	if (Tc != 0 && Tc != 1)
+		return 0;
+	Th = LOBYTE(j);
+	status->htable[Th].valid = 1;
+	status->htable[Th].Tc = Tc;
+	for (i = 1; i <= 16; i++)
+		EXTRACT_UINT8(sdata, status->htable[Th].L[i]);
+	for (i = 1; i <= 16; i++)
+		for (j = 0; j < status->htable[Th].L[i]; j++)
+			EXTRACT_UINT8(sdata, status->htable[Th].V[i][j]);
+	/* Initialize hmin and hmax */
+	status->htable[Th].hmin[0] = status->htable[Th].hmax[0] = -1;
+	for (i = 1; i <= 16; i++)
+	{
+		status->htable[Th].hmin[i] = (status->htable[Th].hmax[i - 1] + 1) << 1;
+		status->htable[Th].hmax[i] = status->htable[Th].hmin[i] + status->htable[Th].L[i] - 1;
+	}
+	return 1;
+}
+
+static int jpeg_extract_huffman_code(JPEG_huffman_table *huffman, const unsigned char **data, int *bit, int *size, unsigned char *code)
+{
+	int i, j;
+
+	j = 0;
+	for (i = 1; i <= 16; i++)
+	{
+		j = (j << 1) | extract_bits_big(data, bit, size, 1);
+		if (j >= huffman->hmin[i] && j <= huffman->hmax[i])
+		{
+			*code = huffman->V[i][j - huffman->hmin[i]];
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int jpeg_process_segment(JPEG_status *status, unsigned char stype, const unsigned char *sdata, int slen)
+{
+	if (stype == JPEG_DRI)
+		return jpeg_process_restart_interval(status, stype, sdata, slen);
+	else if (stype == JPEG_DQT)
+		return jpeg_process_quantization_table(status, stype, sdata, slen);
+	else if (stype == JPEG_DHT)
+		return jpeg_process_huffman_table(status, stype, sdata, slen);
+	else /* Unrecognized segment marker, just return without processing */
+		return 1;
+}
+
+static int jpeg_process_sof(JPEG_status *status, unsigned char stype, const unsigned char *sdata, int slen)
+{
+	int i, j, k;
+	/* TODO: Check size */
+	EXTRACT_UINT8(sdata, status->P);
+	EXTRACT_UINT16_BIG(sdata, status->Y);
+	EXTRACT_UINT16_BIG(sdata, status->X);
+	EXTRACT_UINT8(sdata, status->Nf);
+	if (status->P != 8)
+		return 0;
+	if (status->Y == 0 || status->X == 0)
+		return 0;
+	if (status->Nf != 1 && status->Nf != 3) /* We only accept grayscale or YCbCr */
+		return 0;
+	for (i = 1; i <= status->Nf; i++)
+	{
+		EXTRACT_UINT8(sdata, k);
+		if (k != i) /* No non-standard mapping please */
+			return 0;
+		status->comp[k].valid = 1;
+		EXTRACT_UINT8(sdata, j);
+		status->comp[k].H = HIBYTE(j);
+		status->comp[k].V = LOBYTE(j);
+		if (status->comp[k].H == 0 || status->comp[k].V == 0)
+			return 0;
+		EXTRACT_UINT8(sdata, status->comp[k].Tq);
+		status->hmax = max(status->hmax, status->comp[k].H);
+		status->vmax = max(status->vmax, status->comp[k].V);
+	}
+	/* Allocate memory for components */
+	for (i = 1; i <= status->Nf; i++)
+	{
+		status->comp[k].Y = (int)ceil((double)status->comp[k].V / (double)status->vmax) * status->Y;
+		status->comp[k].X = (int)ceil((double)status->comp[k].H / (double)status->hmax) * status->X;
+		status->comp[k].raw = malloc(((status->comp[k].X + 7) / 8) * ((status->comp[k].Y + 7) / 8) * 64); /* Fit 8x8 block */
+	}
+	return 1;
+}
+
+static int jpeg_process_scan(JPEG_status *status, unsigned char stype, const unsigned char *sdata, int size)
+{
+	int i, j, k, c, g, mx, my, x, y;
+	int ycnt, xcnt, mcucnt;
+	int bit;
+	unsigned char t, rs, r, s;
+	unsigned char raw[64];
+
+	memset(raw, 0, sizeof(raw));
+
+	/* TODO: Check size */
+	EXTRACT_UINT8(sdata, status->Ns);
+	for (i = 1; i <= status->Ns; i++)
+	{
+		EXTRACT_UINT8(sdata, status->Cs[i]);
+		if (!status->comp[status->Cs[i]].valid)
+			return 0;
+		EXTRACT_UINT8(sdata, j); /* TODO: Check validity of table destination selector */
+		status->Td[i] = HIBYTE(j);
+		status->Ta[i] = LOBYTE(j);
+	}
+	EXTRACT_UINT8(sdata, status->Ss);
+	EXTRACT_UINT8(sdata, status->Se);
+	EXTRACT_UINT8(sdata, j);
+	status->Ah = HIBYTE(j);
+	status->Al = LOBYTE(j);
+	/* These shall all be zero for sequential DCT process */
+	if (status->Ss != 0 || status->Se != 0 || status->Ah != 0 || status->Al != 0)
+		return 0;
+
+	/* Extents of MCU */
+	ycnt = ((status->Y + 7) / 8 + status->vmax - 1) / status->vmax;
+	xcnt = ((status->X + 7) / 8 + status->hmax - 1) / status->hmax;
+	mcucnt = 0;
+	bit = 0;
+
+	for (i = 0; i < ycnt; i++)
+		for (j = 0; j < xcnt; j++)
+		{
+			/* Decode MCU */
+			for (k = 1; k <= status->Ns; k++)
+			{
+				c = status->Cs[k];
+				for (my = 0; my < status->comp[c].V; my++)
+					for (mx = 0; mx < status->comp[c].H; mx++)
+					{
+						/* Decode 8x8 block */
+						/* Read data in */
+						jpeg_extract_huffman_code(&status->htable[status->Td[k]], &sdata, &bit, &size, &t);
+						raw[0] = extract_bits_big(&sdata, &bit, &size, t);
+						for (g = 1; g <= 63;)
+						{
+							jpeg_extract_huffman_code(&status->htable[status->Ta[k]], &sdata, &bit, &size, &rs);
+							r = HIBYTE(rs);
+							s = LOBYTE(rs);
+							if (s == 0)
+							{
+								if (r == 15)
+									break;
+								else
+									g += 16;
+							}
+							else
+							{
+								g += r;
+								jpeg_extract_huffman_code(&status->htable[status->Ta[k]], &sdata, &bit, &size, &t);
+								raw[g] = extract_bits_big(&sdata, &bit, &size, t);
+							}
+						}
+						/* Extend, quantization and IDCT */
+					}
+			}
+			mcucnt++;
+			if (mcucnt == status->Ri) /* Should occur a RST marker */
+			{
+				/* TODO */
+			}
+		}
+
+	return 1;
+}
+
+static char *jpeg_decode(const unsigned char *data, int size, int *width, int *height)
+{
+	unsigned char stype;
+	const unsigned char *sdata;
+	int slen;
+	JPEG_status status;
+	int i;
+
+	memset(&status, 0, sizeof(JPEG_status));
+
+	if (!jpeg_extract_segment(&data, &size, &stype, &sdata, &slen) || stype != JPEG_SOI)
+		goto FINISH;
+	for (;;)
+	{
+		if (!jpeg_extract_segment(&data, &size, &stype, &sdata, &slen))
+			goto FINISH;
+		if (stype == JPEG_SOF0)
+			break;
+		if (!jpeg_process_segment(&status, stype, sdata, slen))
+			goto FINISH;
+	}
+	if (!jpeg_process_sof(&status, stype, sdata, slen))
+		goto FINISH;
+
+	for (;;)
+	{
+		if (!jpeg_extract_segment(&data, &size, &stype, &sdata, &slen))
+			goto FINISH;
+		if (stype == JPEG_SOS)
+			break;
+		if (!jpeg_process_segment(&status, stype, sdata, slen))
+			goto FINISH;
+	}
+	if (!jpeg_process_scan(&status, stype, sdata, slen))
+		goto FINISH;
+	
+FINISH:
+	for (i = 0; i < JPEG_COMPONENTS_COUNT; i++)
+		if (status.comp[i].raw)
+			free(status.comp[i].raw);
+	return NULL;
+}
+
 char *fluid_decode(const char *_data, int size, int *width, int *height)
 {
 	const unsigned char *data = _data;
-	/* Check image format and call corresponding image decoder */
+	/* Identify image format and call corresponding image decoder */
 	/* Check PNG */
 	if (size >= 8)
 	{
 		if (data[0] == 137 && data[1] == 80 && data[2] == 78 && data[3] == 71 &&
 			data[4] == 13 && data[5] == 10 && data[6] == 26 && data[7] == 10)
 			return png_decode(data + 8, size - 8, width, height);
+	}
+	/* Check JPEG */
+	if (size >= 1)
+	{
+		if (data[0] == 0xFF)
+			return jpeg_decode(data, size, width, height);
 	}
 	return NULL;
 }
