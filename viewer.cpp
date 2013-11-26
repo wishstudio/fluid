@@ -71,7 +71,7 @@ static void loadImage(HWND hWnd, LPWSTR fileName)
 		return;
 	}
 
-	int width, height;
+	int width, height, comp;
 	char *decoded = fluid_decode(data, size, &width, &height);
 	free(data);
 	if (decoded == nullptr)
@@ -143,6 +143,7 @@ static void openFile(HWND hWnd)
 	/* Set file types */
 	COMDLG_FILTERSPEC fileTypes[] =
 	{
+		{ L"JPEG images", L"*.jpg" },
 		{ L"PNG images", L"*.png" }
 	};
 	hr = pFileDialog->SetFileTypes(ARRAYSIZE(fileTypes), fileTypes);
@@ -194,7 +195,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		HDC dc = GetDC(hWnd);
 		HDC bitmapDC = CreateCompatibleDC(dc);
 		SelectObject(bitmapDC, bitmap);
-		StretchBlt(dc, 10, 100, bitmapWidth * 10, bitmapHeight * 10, bitmapDC, 0, 0, bitmapWidth, bitmapHeight, SRCCOPY);
+		StretchBlt(dc, 10, 100, bitmapWidth, bitmapHeight, bitmapDC, 0, 0, bitmapWidth, bitmapHeight, SRCCOPY);
 		DeleteDC(bitmapDC);
 		ReleaseDC(hWnd, dc);
 		break;
