@@ -903,6 +903,7 @@ FINISH:
 typedef struct
 {
 	int H, V, Tq;
+	int hs, vs;
 	int linebytes, lines;
 	int valid;
 	unsigned char *raw;
@@ -1158,11 +1159,18 @@ static int jpeg_process_sof(JPEG_status *status, unsigned char stype, const unsi
 		EXTRACT_UINT8(sdata, j);
 		status->comp[i].H = HIBYTE(j);
 		status->comp[i].V = LOBYTE(j);
-		if (status->comp[i].H == 0 || status->comp[i].V == 0)
+		if (status->comp[i].H == 0 || status->comp[i].H > 4 || status->comp[i].V == 0 || status->comp[i].V > 4)
 			return 0;
 		EXTRACT_UINT8(sdata, status->comp[i].Tq);
 		status->hmax = max(status->hmax, status->comp[i].H);
 		status->vmax = max(status->vmax, status->comp[i].V);
+	}
+	for (i = 1; i <= status->Nf; i++)
+	{
+		if (status->hmax % status->comp[i].H != 0 || status->vmax % status->comp[i].V != 0) /* 4:3 and 3:2 is Unsupported */
+			return 0;
+		status->comp[i].hs = status->hmax / status->comp[i].H;
+		status->comp[i].vs = status->vmax / status->comp[i].V;
 	}
 	status->vcnt = (status->Y + status->vmax * 8 - 1) / (status->vmax * 8);
 	status->hcnt = (status->X + status->hmax * 8 - 1) / (status->hmax * 8);
@@ -1366,6 +1374,7 @@ static char *jpeg_decode(const unsigned char *data, int size, int *width, int *h
 	int slen;
 	JPEG_status status;
 	int i, j, k;
+	int Y, Cb, Cr;
 
 	memset(&status, 0, sizeof(JPEG_status));
 
@@ -1402,14 +1411,34 @@ static char *jpeg_decode(const unsigned char *data, int size, int *width, int *h
 		goto FINISH;
 	*width = status.X;
 	*height = status.Y;
-	/* TODO */
-	for (i = 0; i < status.Y; i++)
-		for (j = 0; j < status.X; j++)
-		{
-			k = (i * status.X + j) * 4;
-			status.image[k] = status.image[k + 1] = status.image[k + 2] = status.comp[1].raw[status.comp[1].linebytes * i + j];
-			status.image[k + 3] = 0xFF;
-		}
+
+	if (status.Nf == 1)
+	{
+		for (i = 0; i < status.Y; i++)
+			for (j = 0; j < status.X; j++)
+			{
+				k = (i * status.X + j) * 4;
+				status.image[k] = status.image[k + 1] = status.image[k + 2] = status.comp[1].raw[status.comp[1].linebytes * i + j];
+				status.image[k + 3] = 0xFF;
+			}
+	}
+	else /* Nf == 3 */
+	{
+		/* Resample and YCbCr -> RGB */
+		for (i = 0; i < status.Y; i++)
+			for (j = 0; j < status.X; j++)
+			{
+				k = (i * status.X + j) * 4;
+				Y = status.comp[1].raw[(i / status.comp[1].vs) * status.comp[1].linebytes + j / status.comp[1].hs];
+				Cb = status.comp[2].raw[(i / status.comp[2].vs) * status.comp[2].linebytes + j / status.comp[2].hs];
+				Cr = status.comp[3].raw[(i / status.comp[3].vs) * status.comp[3].linebytes + j / status.comp[3].hs];
+
+				status.image[k + 0] = Y + 1.402 * (Cr - 128);
+				status.image[k + 1] = Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128);
+				status.image[k + 2] = Y + 1.772 * (Cb - 128);
+				status.image[k + 3] = 0xFF;
+			}
+	}
 	
 FINISH:
 	for (i = 0; i < JPEG_COMPONENTS_COUNT; i++)
