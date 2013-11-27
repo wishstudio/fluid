@@ -99,6 +99,17 @@ static int extract_bits_little(const unsigned char **data, int *bit, int *size, 
 	return x;
 }
 
+static INLINE int color_clamp(int c)
+{
+	if ((unsigned int) c > 255)
+	{
+		if (c < 0)
+			return 0;
+		return 255;
+	}
+	return c;
+}
+
 /* Zlib deflate decoder */
 #define DEFLATE_ALPHABET_SIZE			288
 #define DEFLATE_HUFFMAN_MAX_CODELEN		15
@@ -1354,15 +1365,7 @@ static int jpeg_extract_scan(JPEG_status *status, const unsigned char **data, in
 							{
 								Y = (i * status->comp[c].V + my) * 8 + y;
 								X = (j * status->comp[c].H + mx) * 8 + x;
-								g = co[y * 8 + x] + 128;
-								if ((unsigned int) g > 255)
-								{
-									if (g < 0)
-										g = 0;
-									else
-										g = 255;
-								}
-								status->comp[c].raw[status->comp[c].linebytes * Y + X] = g;
+								status->comp[c].raw[status->comp[c].linebytes * Y + X] = color_clamp(co[y * 8 + x] + 128);
 							}
 					}
 			}
@@ -1395,7 +1398,6 @@ static char *jpeg_decode(const unsigned char *data, int size, int *width, int *h
 	JPEG_status status;
 	int i, j, k;
 	int Y, Cb, Cr;
-	int R, G, B;
 
 	memset(&status, 0, sizeof(JPEG_status));
 
@@ -1454,35 +1456,9 @@ static char *jpeg_decode(const unsigned char *data, int size, int *width, int *h
 				Cb = status.comp[2].raw[(i / status.comp[2].vs) * status.comp[2].linebytes + j / status.comp[2].hs];
 				Cr = status.comp[3].raw[(i / status.comp[3].vs) * status.comp[3].linebytes + j / status.comp[3].hs];
 
-				R = Y + 1.402 * (Cr - 128);
-				G = Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128);
-				B = Y + 1.772 * (Cb - 128);
-
-				if ((unsigned int) R > 255)
-				{
-					if (R < 0)
-						R = 0;
-					else
-						R = 255;
-				}
-				if ((unsigned int) G > 255)
-				{
-					if (G < 0)
-						G = 0;
-					else
-						G = 255;
-				}
-				if ((unsigned int) B > 255)
-				{
-					if (B < 0)
-						B = 0;
-					else
-						B = 255;
-				}
-
-				status.image[k + 0] = R;
-				status.image[k + 1] = G;
-				status.image[k + 2] = B;
+				status.image[k + 0] = color_clamp((int)(Y + 1.402 * (Cr - 128)));
+				status.image[k + 1] = color_clamp((int)(Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128)));
+				status.image[k + 2] = color_clamp((int)(Y + 1.772 * (Cb - 128)));
 				status.image[k + 3] = 255;
 			}
 	}
