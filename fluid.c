@@ -1199,15 +1199,15 @@ static int jpeg_process_sof(JPEG_status *status, unsigned char stype, const unsi
 }
 
 /* The EXTEND procedure in JPEG specification */
-static INLINE int jpeg_extend(unsigned char raw, int t)
+static INLINE int jpeg_extend(int raw, int t)
 {
 	int Vt;
 	
 	Vt = 1 << (t - 1);
 	if (raw < Vt)
-		return (int)raw + ((-1) << t) + 1;
+		return raw + ((-1) << t) + 1;
 	else
-		return (int)raw;
+		return raw;
 }
 
 /* TODO: Optimization */
