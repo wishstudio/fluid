@@ -810,6 +810,9 @@ static char *png_decode(const unsigned char *data, int size, int *width, int *he
 		if (status.color_type == 3 && !status.palette) /* No palette for indexed color type */
 			goto FINISH;
 
+		if (status.zraw == NULL)
+			goto FINISH;
+
 		/* Zlib decompress */
 		status.raw = malloc(status.rawlen);
 		if (!status.raw)
