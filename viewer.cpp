@@ -71,7 +71,7 @@ static void loadImage(HWND hWnd, LPWSTR fileName)
 		return;
 	}
 
-	int width, height, comp;
+	int width, height;
 	char *decoded = fluid_decode(data, size, &width, &height);
 	free(data);
 	if (decoded == nullptr)
@@ -143,8 +143,7 @@ static void openFile(HWND hWnd)
 	/* Set file types */
 	COMDLG_FILTERSPEC fileTypes[] =
 	{
-		{ L"JPEG images", L"*.jpg" },
-		{ L"PNG images", L"*.png" }
+		{ L"All supported images", L"*.png;*.jpg;*.jpeg" },
 	};
 	hr = pFileDialog->SetFileTypes(ARRAYSIZE(fileTypes), fileTypes);
 	if (FAILED(hr))
