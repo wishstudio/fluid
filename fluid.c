@@ -1470,6 +1470,70 @@ FINISH:
 	return status.image;
 }
 
+/* PSD Decoder */
+#define PSD_BITMAP		0
+#define PSD_GRAYSCALE	1
+#define PSD_INDEXED		2
+#define PSD_RGB			3
+#define PSD_CMYK		4
+#define PSD_MULTI		7
+#define PSD_DUOTONE		8
+#define PSD_LAB			9
+typedef struct
+{
+	int channels;
+	int width, height;
+	int depth;
+	int color_mode;
+	int compression_method;
+} PSD_status;
+
+static char *psd_decode(const unsigned char *data, int size, int *width, int *height)
+{
+	int i, j, k;
+	PSD_status status;
+
+	/* TODO: Check size */
+	
+	/* File header */
+	EXTRACT_UINT16_BIG(data, k); /* Version */
+	if (k != 1)
+		return 0;
+	data += 4; /* Reserved */
+	EXTRACT_UINT16_BIG(data, status.channels);
+	EXTRACT_UINT32_BIG(data, status.height);
+	EXTRACT_UINT32_BIG(data, status.width);
+	EXTRACT_UINT16_BIG(data, status.depth);
+	EXTRACT_UINT16_BIG(data, status.color_mode);
+	
+	if (status.channels < 1 || status.channels > 56)
+		return 0;
+	if (status.width == 0 || status.height == 0)
+		return 0;
+	if (status.depth != 1 && status.depth != 8 && status.depth != 16 && status.depth != 32)
+		return 0;
+	/* TODO: Check validity of color mode */
+
+	/* Color mode data */
+	EXTRACT_UINT32_BIG(data, k);
+	data += k; /* Just skip */
+
+	/* Image resources */
+	EXTRACT_UINT32_BIG(data, k);
+	data += k; /* just skip */
+
+	/* Layer and mask information */
+	EXTRACT_UINT32_BIG(data, k);
+	data += k; /* just skip */
+
+	/* Image data */
+	EXTRACT_UINT16_BIG(data, status.compression_method);
+	/* TODO: Decompression */
+
+FINISH:
+	return NULL;
+}
+
 char *fluid_decode(const char *_data, int size, int *width, int *height)
 {
 	const unsigned char *data = _data;
@@ -1486,6 +1550,12 @@ char *fluid_decode(const char *_data, int size, int *width, int *height)
 	{
 		if (data[0] == 0xFF)
 			return jpeg_decode(data, size, width, height);
+	}
+	/* Check PSD */
+	if (size >= 4)
+	{
+		if (data[0] == '8' && data[1] == 'B' && data[2] == 'P' && data[3] == 'S')
+			return psd_decode(data + 4, size - 4, width, height);
 	}
 	return NULL;
 }
