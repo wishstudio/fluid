@@ -1025,31 +1025,37 @@ static int jpeg_process_restart_interval(JPEG_status *status, unsigned char styp
 static int jpeg_process_quantization_table(JPEG_status *status, unsigned char stype, const unsigned char *sdata, int slen)
 {
 	int i, j, Pq, Tq;
-	if (slen < 1)
+	if (slen == 0)
 		return 0;
-	slen--;
-	EXTRACT_UINT8(sdata, j);
-	Pq = HIBYTE(j);
-	if (Pq == 0)
-		Pq = 8;
-	else if (Pq == 1)
-		Pq = 16;
-	else
-		return 0;
-	Tq = LOBYTE(j);
-	status->qtable[Tq].valid = 1;
-	status->qtable[Tq].Pq = Pq;
-	if (slen != Pq / 8 * 64)
-		return 0;
-	if (Pq == 8)
+	while (slen > 0)
 	{
-		for (i = 0; i < 64; i++)
-			EXTRACT_UINT8(sdata, status->qtable[Tq].Qk[i]);
-	}
-	else
-	{
-		for (i = 0; i < 64; i++)
-			EXTRACT_UINT16_BIG(sdata, status->qtable[Tq].Qk[i]);
+		if (slen < 1)
+			return 0;
+		slen--;
+		EXTRACT_UINT8(sdata, j);
+		Pq = HIBYTE(j);
+		if (Pq == 0)
+			Pq = 8;
+		else if (Pq == 1)
+			Pq = 16;
+		else
+			return 0;
+		Tq = LOBYTE(j);
+		status->qtable[Tq].valid = 1;
+		status->qtable[Tq].Pq = Pq;
+		if (slen < Pq / 8 * 64)
+			return 0;
+		slen -= Pq / 8 * 64;
+		if (Pq == 8)
+		{
+			for (i = 0; i < 64; i++)
+				EXTRACT_UINT8(sdata, status->qtable[Tq].Qk[i]);
+		}
+		else
+		{
+			for (i = 0; i < 64; i++)
+				EXTRACT_UINT16_BIG(sdata, status->qtable[Tq].Qk[i]);
+		}
 	}
 	return 1;
 }
@@ -1058,45 +1064,51 @@ static int jpeg_process_huffman_table(JPEG_status *status, unsigned char stype, 
 {
 	int i, j, mt, Tc, Th;
 	JPEG_huffman_table *huffman;
-	if (slen < 17)
+	if (slen == 0)
 		return 0;
-	slen -= 17;
-	EXTRACT_UINT8(sdata, j);
-	Tc = HIBYTE(j);
-	Th = LOBYTE(j);
-	if (Tc > 1 || Th > 3)
-		return 0;
-	if (Tc == 0)
-		huffman = &status->hdc[Th];
-	else
-		huffman = &status->hac[Th];
-	huffman->valid = 1;
-	mt = 0;
-	for (i = 1; i <= 16; i++)
+	while (slen > 0)
 	{
-		EXTRACT_UINT8(sdata, huffman->L[i]);
-		mt += huffman->L[i];
-	}
-	if (slen != mt)
-		return 0;
-	for (i = 1; i <= 16; i++)
+		if (slen < 17)
+			return 0;
+		slen -= 17;
+		EXTRACT_UINT8(sdata, j);
+		Tc = HIBYTE(j);
+		Th = LOBYTE(j);
+		if (Tc > 1 || Th > 3)
+			return 0;
+		if (Tc == 0)
+			huffman = &status->hdc[Th];
+		else
+			huffman = &status->hac[Th];
+		huffman->valid = 1;
+		mt = 0;
+		for (i = 1; i <= 16; i++)
+		{
+			EXTRACT_UINT8(sdata, huffman->L[i]);
+			mt += huffman->L[i];
+		}
+		if (slen < mt)
+			return 0;
+		slen -= mt;
+		for (i = 1; i <= 16; i++)
 		for (j = 0; j < huffman->L[i]; j++)
 			EXTRACT_UINT8(sdata, huffman->V[i][j]);
-	/* Initialize hmin and hmax */
-	j = 0;
-	for (i = 1; i <= 16; i++)
-	{
-		if (huffman->L[i] == 0)
-			huffman->hmin[i] = huffman->hmax[i] = -1;
-		else
+		/* Initialize hmin and hmax */
+		j = 0;
+		for (i = 1; i <= 16; i++)
 		{
-			huffman->hmin[i] = j;
-			huffman->hmax[i] = j + huffman->L[i] - 1;
-			if (huffman->hmax[i] >= (1 << i))
-				return 0;
-			j += huffman->L[i];
+			if (huffman->L[i] == 0)
+				huffman->hmin[i] = huffman->hmax[i] = -1;
+			else
+			{
+				huffman->hmin[i] = j;
+				huffman->hmax[i] = j + huffman->L[i] - 1;
+				if (huffman->hmax[i] >= (1 << i))
+					return 0;
+				j += huffman->L[i];
+			}
+			j <<= 1;
 		}
-		j <<= 1;
 	}
 	return 1;
 }
@@ -1296,7 +1308,7 @@ static int jpeg_extract_scan(JPEG_status *status, const unsigned char **data, in
 							return 0;
 						if (!jpeg_extract_bits(data, &bit, size, t, &tmp))
 							return 0;
-						status->pred[k] += jpeg_extend(tmp, t);
+						status->pred[k] += t ? jpeg_extend(tmp, t) : 0;
 						raw[0] = status->pred[k];
 						for (g = 1; g <= 63; g++)
 							raw[g] = 0;
@@ -1321,7 +1333,7 @@ static int jpeg_extract_scan(JPEG_status *status, const unsigned char **data, in
 									return 0;
 								if (!jpeg_extract_bits(data, &bit, size, s, &tmp))
 									return 0;
-								raw[g] = jpeg_extend(tmp, s);
+								raw[g] = s ? jpeg_extend(tmp, s) : 0;
 								if (g == 63)
 									break;
 								g++;
