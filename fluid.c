@@ -99,6 +99,20 @@ static int extract_bits_little(const unsigned char **data, int *bit, int *size, 
 	return x;
 }
 
+/* Rescale sample from depth-bit to 8-bit */
+static INLINE unsigned int sample_rescale(unsigned int depth, unsigned int sample)
+{
+	if (depth >= 8) /* Down sample */
+		return sample >> (depth - 8);
+	else /* Up sample */
+	{
+		if (sample & 1)
+			return (sample << (8 - depth)) | BITMASK(8 - depth);
+		else
+			return sample << (8 - depth);
+	}
+}
+
 static INLINE int color_clamp(int c)
 {
 	if ((unsigned int) c > 255)
@@ -427,20 +441,6 @@ static INLINE int png_get_scanline_len(int width, int depth, int sample_per_pixe
 		return 1 + width * sample_per_pixel * depth / 8;
 }
 
-/* Rescale sample from depth-bit to 8-bit */
-static INLINE unsigned int png_rescale_sample(unsigned int depth, unsigned int sample)
-{
-	if (depth >= 8) /* Down sample */
-		return sample >> (depth - 8);
-	else /* Up sample */
-	{
-		if (sample & 1)
-			return (sample << (8 - depth)) | BITMASK(8 - depth);
-		else
-			return sample << (8 - depth);
-	}
-}
-
 static INLINE int png_paeth_predictor(int a, int b, int c)
 {
 	int p, pa, pb, pc;
@@ -584,7 +584,7 @@ static int png_extract_pixels(PNG_status *status, const unsigned char *data, uns
 			for (j = 0; j < width; j++)
 			{
 				sampleg = extract_bits_big(&data, &bit, &size, status->depth);
-				image[0] = image[1] = image[2] = png_rescale_sample(status->depth, sampleg);
+				image[0] = image[1] = image[2] = sample_rescale(status->depth, sampleg);
 				image[3] = (status->transparency && sampleg == tg) ? 0 : 0xFF;
 				image += 4;
 			}
@@ -608,9 +608,9 @@ static int png_extract_pixels(PNG_status *status, const unsigned char *data, uns
 				sampler = extract_bits_big(&data, &bit, &size, status->depth);
 				sampleg = extract_bits_big(&data, &bit, &size, status->depth);
 				sampleb = extract_bits_big(&data, &bit, &size, status->depth);
-				image[0] = png_rescale_sample(status->depth, sampler);
-				image[1] = png_rescale_sample(status->depth, sampleg);
-				image[2] = png_rescale_sample(status->depth, sampleb);
+				image[0] = sample_rescale(status->depth, sampler);
+				image[1] = sample_rescale(status->depth, sampleg);
+				image[2] = sample_rescale(status->depth, sampleb);
 				image[3] = (status->transparency && sampler == tr && sampleg == tg && sampleb == tb) ? 0 : 0xFF;
 				image += 4;
 			}
@@ -645,8 +645,8 @@ static int png_extract_pixels(PNG_status *status, const unsigned char *data, uns
 			data++; /* Filter type byte */
 			for (j = 0; j < width; j++)
 			{
-				image[0] = image[1] = image[2] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
-				image[3] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[0] = image[1] = image[2] = sample_rescale(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[3] = sample_rescale(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
 				image += 4;
 			}
 			if (bit > 0) /* Skip remaining bits */
@@ -660,10 +660,10 @@ static int png_extract_pixels(PNG_status *status, const unsigned char *data, uns
 			data++; /* Filter type byte */
 			for (j = 0; j < width; j++)
 			{
-				image[0] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
-				image[1] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
-				image[2] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
-				image[3] = png_rescale_sample(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[0] = sample_rescale(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[1] = sample_rescale(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[2] = sample_rescale(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
+				image[3] = sample_rescale(status->depth, extract_bits_big(&data, &bit, &size, status->depth));
 				image += 4;
 			}
 			if (bit > 0) /* Skip remaining bits */
@@ -1489,12 +1489,15 @@ typedef struct
 	int depth;
 	int color_mode;
 	int compression_method;
+	unsigned char *image;
 } PSD_status;
 
 static char *psd_decode(const unsigned char *data, int size, int *width, int *height)
 {
-	int i, j, k;
+	int i, j, k, c, bit;
 	PSD_status status;
+
+	memset(&status, 0, sizeof(PSD_status));
 
 	/* TODO: Check size */
 	
@@ -1502,20 +1505,24 @@ static char *psd_decode(const unsigned char *data, int size, int *width, int *he
 	EXTRACT_UINT16_BIG(data, k); /* Version */
 	if (k != 1)
 		return 0;
-	data += 4; /* Reserved */
+	data += 6; /* Reserved */
 	EXTRACT_UINT16_BIG(data, status.channels);
 	EXTRACT_UINT32_BIG(data, status.height);
 	EXTRACT_UINT32_BIG(data, status.width);
 	EXTRACT_UINT16_BIG(data, status.depth);
 	EXTRACT_UINT16_BIG(data, status.color_mode);
+
+	*width = status.width;
+	*height = status.height;
 	
-	if (status.channels < 1 || status.channels > 56)
+	if (status.channels != 3)
 		return 0;
 	if (status.width == 0 || status.height == 0)
 		return 0;
 	if (status.depth != 1 && status.depth != 8 && status.depth != 16 && status.depth != 32)
 		return 0;
-	/* TODO: Check validity of color mode */
+	if (status.color_mode != PSD_RGB)
+		return 0;
 
 	/* Color mode data */
 	EXTRACT_UINT32_BIG(data, k);
@@ -1530,11 +1537,36 @@ static char *psd_decode(const unsigned char *data, int size, int *width, int *he
 	data += k; /* just skip */
 
 	/* Image data */
+	status.image = malloc(status.width * status.height * 4);
+	if (!status.image)
+		goto FINISH;
 	EXTRACT_UINT16_BIG(data, status.compression_method);
-	/* TODO: Decompression */
+	if (status.compression_method == 0)
+	{
+		/* TODO: Check size */
+		bit = 0;
+		for (c = 0; c < status.channels; c++)
+			for (i = 0; i < status.height; i++)
+				for (j = 0; j < status.width; j++)
+				{
+					k = (i * status.width + j) * 4;
+					status.image[k + c] = sample_rescale(status.depth, extract_bits_big(&data, &bit, &size, status.depth));
+				}
+		for (i = 0; i < status.height; i++)
+			for (j = 0; j < status.width; j++)
+			{
+				k = (i * status.width + j) * 4;
+				status.image[k + 3] = 255;
+			}
+	}
+	else if (status.compression_method == 1)
+	{
+	}
+	else /* Unsupported compression method */
+		return 0;
 
 FINISH:
-	return NULL;
+	return status.image;
 }
 
 char *fluid_decode(const char *_data, int size, int *width, int *height)

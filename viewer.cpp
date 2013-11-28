@@ -143,7 +143,7 @@ static void openFile(HWND hWnd)
 	/* Set file types */
 	COMDLG_FILTERSPEC fileTypes[] =
 	{
-		{ L"All supported images", L"*.png;*.jpg;*.jpeg" },
+		{ L"All supported images", L"*.png;*.jpg;*.jpeg;*.psd" },
 	};
 	hr = pFileDialog->SetFileTypes(ARRAYSIZE(fileTypes), fileTypes);
 	if (FAILED(hr))
