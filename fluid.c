@@ -1378,9 +1378,10 @@ static int jpeg_extract_scan(JPEG_status *status, const unsigned char **data, in
 				for (k = 1; k <= status->Ns; k++)
 					status->pred[k] = 0;
 				/* Skip remaining bits in current byte */
-				/* TODO: Check size */
 				if (bit > 0)
 					(*data)++, bit = 0, (*size)--;
+				if (*size < 2)
+					return 0;
 				if (**data != 0xFF)
 					return 0;
 				(*data)++, (*size)--;
