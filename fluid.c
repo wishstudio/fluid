@@ -1495,12 +1495,13 @@ typedef struct
 
 static char *psd_decode(const unsigned char *data, int size, int *width, int *height)
 {
-	int i, j, k, c, bit;
+	int i, j, k, c, bit, expected_size;
 	PSD_status status;
 
 	memset(&status, 0, sizeof(PSD_status));
 
-	/* TODO: Check size */
+	if (size < 16)
+		return 0;
 	
 	/* File header */
 	EXTRACT_UINT16_BIG(data, k); /* Version */
@@ -1512,6 +1513,7 @@ static char *psd_decode(const unsigned char *data, int size, int *width, int *he
 	EXTRACT_UINT32_BIG(data, status.width);
 	EXTRACT_UINT16_BIG(data, status.depth);
 	EXTRACT_UINT16_BIG(data, status.color_mode);
+	size -= 16;
 
 	*width = status.width;
 	*height = status.height;
@@ -1526,25 +1528,53 @@ static char *psd_decode(const unsigned char *data, int size, int *width, int *he
 		return 0;
 
 	/* Color mode data */
+	if (size < 4)
+		return 0;
 	EXTRACT_UINT32_BIG(data, k);
+	if (size < 4 + k)
+		return 0;
 	data += k; /* Just skip */
+	size -= k;
 
 	/* Image resources */
+	if (size < 4)
+		return 0;
 	EXTRACT_UINT32_BIG(data, k);
+	if (size < 4 + k)
+		return 0;
 	data += k; /* just skip */
+	size -= k;
 
 	/* Layer and mask information */
+	if (size < 4)
+		return 0;
 	EXTRACT_UINT32_BIG(data, k);
+	if (size < 4 + k)
+		return 0;
 	data += k; /* just skip */
+	size -= k;
 
 	/* Image data */
+	if (size < 2)
+		return 0;
+	EXTRACT_UINT16_BIG(data, status.compression_method);
+	size -= 2;
+
 	status.image = malloc(status.width * status.height * 4);
 	if (!status.image)
 		goto FINISH;
-	EXTRACT_UINT16_BIG(data, status.compression_method);
 	if (status.compression_method == 0)
 	{
-		/* TODO: Check size */
+		expected_size = status.channels * status.width * status.height;
+		if (status.depth == 1)
+			expected_size = (expected_size + 7) / 8;
+		else
+			expected_size = expected_size * (status.depth / 8);
+		if (size < expected_size)
+		{
+			free(status.image);
+			goto FINISH;
+		}
 		bit = 0;
 		for (c = 0; c < status.channels; c++)
 			for (i = 0; i < status.height; i++)
